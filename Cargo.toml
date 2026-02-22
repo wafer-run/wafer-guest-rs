@@ -1,10 +1,10 @@
 [package]
-name = "wafer-guest"
+name = "wafer-sdk"
 version = "0.1.0"
 edition = "2021"
-description = "WAFER guest SDK for writing blocks compiled to WebAssembly (wasm32-wasip1)"
+description = "WAFER SDK for writing blocks compiled to WebAssembly (wasm32-wasip1)"
 license = "MIT"
-repository = "https://github.com/wafer-run/wafer-guest-rs"
+repository = "https://github.com/wafer-run/wafer-sdk-rs"
 keywords = ["wafer", "wasm", "guest", "blocks", "pipeline"]
 
 [lib]
