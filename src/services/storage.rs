@@ -75,7 +75,7 @@ impl<'a> StorageClient<'a> {
         let ct = resp
             .meta
             .iter()
-            .find(|(k, _)| k == "content_type")
+            .find(|(k, _)| k.as_str() == "content_type")
             .map(|(_, v)| v.clone())
             .unwrap_or_default();
 
