@@ -1,91 +1,67 @@
-//! Network service client for outbound HTTP requests.
+//! Network service client using WIT-generated imports.
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::context::Context;
-use crate::types::*;
+use crate::wafer::block_world::network as wit;
+use crate::wafer::block_world::types::MetaEntry;
 
-/// An outbound network request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Request {
-    pub method: String,
-    pub url: String,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub headers: HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body: Option<Vec<u8>>,
-}
-
-/// An outbound network response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// An HTTP response.
+#[derive(Debug, Clone)]
 pub struct Response {
     pub status_code: u16,
-    #[serde(default)]
-    pub headers: HashMap<String, Vec<String>>,
-    #[serde(default)]
+    pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
 }
 
-/// Client for the host network service.
-pub struct NetworkClient<'a> {
-    ctx: &'a Context,
+/// Network error type.
+#[derive(Debug, Clone)]
+pub struct NetworkError {
+    pub kind: String,
+    pub message: String,
 }
 
-impl<'a> NetworkClient<'a> {
-    /// Create a new network client bound to the given context.
-    pub fn new(ctx: &'a Context) -> Self {
-        Self { ctx }
+impl std::fmt::Display for NetworkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.kind, self.message)
     }
+}
 
-    /// Execute an outbound HTTP request.
-    pub fn do_request(&self, req: &Request) -> std::result::Result<Response, WaferError> {
-        let body = serde_json::to_vec(req)
-            .map_err(|e| WaferError::new("encode_error", e.to_string()))?;
+impl std::error::Error for NetworkError {}
 
-        let msg = Message::new("svc.network.do", body);
-
-        let result = self.ctx.send(&msg);
-        if result.action == Action::Error {
-            return Err(result
-                .error
-                .unwrap_or_else(|| WaferError::new("unknown", "network request failed")));
-        }
-
-        let resp = result
-            .response
-            .ok_or_else(|| WaferError::new("no_response", "host returned no response data"))?;
-        serde_json::from_slice(&resp.data)
-            .map_err(|e| WaferError::new("decode_error", e.to_string()))
+fn convert_wit_error(e: wit::NetworkError) -> NetworkError {
+    match e {
+        wit::NetworkError::RequestError => NetworkError { kind: "internal".into(), message: "request failed".into() },
+        wit::NetworkError::SsrfBlocked => NetworkError { kind: "permission_denied".into(), message: "SSRF blocked".into() },
+        wit::NetworkError::Other => NetworkError { kind: "internal".into(), message: "network error".into() },
     }
+}
 
-    /// Convenience: perform a GET request to the given URL.
-    pub fn get(&self, url: &str) -> std::result::Result<Response, WaferError> {
-        self.do_request(&Request {
-            method: "GET".to_string(),
-            url: url.to_string(),
-            headers: HashMap::new(),
-            body: None,
+/// Execute an outbound HTTP request.
+pub fn do_request(method: &str, url: &str, headers: &HashMap<String, String>, body: Option<&[u8]>) -> Result<Response, NetworkError> {
+    let req = wit::HttpRequest {
+        method: method.to_string(),
+        url: url.to_string(),
+        headers: headers.iter().map(|(k, v)| MetaEntry { key: k.clone(), value: v.clone() }).collect(),
+        body: body.map(|b| b.to_vec()),
+    };
+    wit::do_request(&req)
+        .map(|resp| Response {
+            status_code: resp.status_code,
+            headers: resp.headers.into_iter().map(|e| (e.key, e.value)).collect(),
+            body: resp.body,
         })
-    }
+        .map_err(convert_wit_error)
+}
 
-    /// Convenience: perform a POST request with a JSON body.
-    pub fn post_json<T: Serialize>(
-        &self,
-        url: &str,
-        body: &T,
-    ) -> std::result::Result<Response, WaferError> {
-        let data = serde_json::to_vec(body)
-            .map_err(|e| WaferError::new("encode_error", e.to_string()))?;
+/// Convenience: perform a GET request.
+pub fn get(url: &str) -> Result<Response, NetworkError> {
+    do_request("GET", url, &HashMap::new(), None)
+}
 
-        let mut headers = HashMap::new();
-        headers.insert("Content-Type".to_string(), "application/json".to_string());
-
-        self.do_request(&Request {
-            method: "POST".to_string(),
-            url: url.to_string(),
-            headers,
-            body: Some(data),
-        })
-    }
+/// Convenience: perform a POST request with a JSON body.
+pub fn post_json<T: serde::Serialize>(url: &str, body: &T) -> Result<Response, NetworkError> {
+    let data = serde_json::to_vec(body).unwrap_or_default();
+    let mut headers = HashMap::new();
+    headers.insert("Content-Type".to_string(), "application/json".to_string());
+    do_request("POST", url, &headers, Some(&data))
 }

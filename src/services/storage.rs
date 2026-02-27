@@ -1,9 +1,8 @@
-//! Storage service client for object/file storage operations.
+//! Storage service client using WIT-generated imports.
 
 use serde::{Deserialize, Serialize};
 
-use crate::context::Context;
-use crate::types::*;
+use crate::wafer::block_world::storage as wit;
 
 /// Metadata about a stored object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11,96 +10,71 @@ pub struct ObjectInfo {
     pub key: String,
     pub size: i64,
     pub content_type: String,
+    pub last_modified: String,
 }
 
-/// A stored object: its content bytes together with metadata.
+/// A stored object: content bytes together with metadata.
 #[derive(Debug, Clone)]
 pub struct Object {
     pub data: Vec<u8>,
     pub info: ObjectInfo,
 }
 
-/// Client for the host storage service.
-pub struct StorageClient<'a> {
-    ctx: &'a Context,
+/// Storage error type.
+#[derive(Debug, Clone)]
+pub struct StorageError {
+    pub kind: String,
+    pub message: String,
 }
 
-impl<'a> StorageClient<'a> {
-    /// Create a new storage client bound to the given context.
-    pub fn new(ctx: &'a Context) -> Self {
-        Self { ctx }
+impl std::fmt::Display for StorageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.kind, self.message)
     }
+}
 
-    /// Store an object in the given bucket under the given key.
-    pub fn put(
-        &self,
-        bucket: &str,
-        key: &str,
-        data: &[u8],
-        content_type: &str,
-    ) -> std::result::Result<(), WaferError> {
-        let mut msg = Message::new("svc.storage.put", data.to_vec());
-        msg.set_meta("bucket", bucket);
-        msg.set_meta("key", key);
-        if !content_type.is_empty() {
-            msg.set_meta("content_type", content_type);
-        }
+impl std::error::Error for StorageError {}
 
-        let result = self.ctx.send(&msg);
-        if result.action == Action::Error {
-            return Err(result
-                .error
-                .unwrap_or_else(|| WaferError::new("unknown", "storage put failed")));
-        }
-        Ok(())
+fn convert_wit_error(e: wit::StorageError) -> StorageError {
+    match e {
+        wit::StorageError::NotFound => StorageError { kind: "not_found".into(), message: "object not found".into() },
+        wit::StorageError::Internal => StorageError { kind: "internal".into(), message: "internal storage error".into() },
     }
+}
 
-    /// Retrieve an object from the given bucket and key.
-    pub fn get(&self, bucket: &str, key: &str) -> std::result::Result<Object, WaferError> {
-        let mut msg = Message::new("svc.storage.get", Vec::new());
-        msg.set_meta("bucket", bucket);
-        msg.set_meta("key", key);
+/// Store an object in a folder.
+pub fn put(folder: &str, key: &str, data: &[u8], content_type: &str) -> Result<(), StorageError> {
+    wit::put(folder, key, data, content_type).map_err(convert_wit_error)
+}
 
-        let result = self.ctx.send(&msg);
-        if result.action == Action::Error {
-            return Err(result
-                .error
-                .unwrap_or_else(|| WaferError::new("unknown", "storage get failed")));
-        }
-
-        let resp = result
-            .response
-            .ok_or_else(|| WaferError::new("no_response", "host returned no response data"))?;
-
-        let ct = resp
-            .meta
-            .iter()
-            .find(|(k, _)| k.as_str() == "content_type")
-            .map(|(_, v)| v.clone())
-            .unwrap_or_default();
-
-        Ok(Object {
+/// Retrieve an object and its metadata.
+pub fn get(folder: &str, key: &str) -> Result<Object, StorageError> {
+    wit::get(folder, key)
+        .map(|(data, info)| Object {
+            data,
             info: ObjectInfo {
-                key: key.to_string(),
-                size: resp.data.len() as i64,
-                content_type: ct,
+                key: info.key,
+                size: info.size,
+                content_type: info.content_type,
+                last_modified: info.last_modified,
             },
-            data: resp.data,
         })
-    }
+        .map_err(convert_wit_error)
+}
 
-    /// Delete an object from the given bucket and key.
-    pub fn delete(&self, bucket: &str, key: &str) -> std::result::Result<(), WaferError> {
-        let mut msg = Message::new("svc.storage.delete", Vec::new());
-        msg.set_meta("bucket", bucket);
-        msg.set_meta("key", key);
+/// Delete an object.
+pub fn delete(folder: &str, key: &str) -> Result<(), StorageError> {
+    wit::delete(folder, key).map_err(convert_wit_error)
+}
 
-        let result = self.ctx.send(&msg);
-        if result.action == Action::Error {
-            return Err(result
-                .error
-                .unwrap_or_else(|| WaferError::new("unknown", "storage delete failed")));
-        }
-        Ok(())
-    }
+/// List objects in a folder.
+pub fn list(folder: &str, prefix: &str, limit: i64, offset: i64) -> Result<Vec<ObjectInfo>, StorageError> {
+    wit::list(folder, prefix, limit, offset)
+        .map(|ol| ol.objects.into_iter().map(|o| ObjectInfo {
+            key: o.key,
+            size: o.size,
+            content_type: o.content_type,
+            last_modified: o.last_modified,
+        }).collect())
+        .map_err(convert_wit_error)
 }

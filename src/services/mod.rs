@@ -1,8 +1,7 @@
-//! Service clients that communicate with the WAFER host runtime.
+//! Service clients using WIT-generated imports.
 //!
-//! Each client wraps the guest [`Context::send`](crate::context::Context::send)
-//! call, constructing well-known message kinds that the host dispatches to the
-//! corresponding platform service.
+//! Each module provides typed functions that call directly into the host via
+//! the WebAssembly Component Model — no manual serialization needed.
 
 pub mod config;
 pub mod crypto;

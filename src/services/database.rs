@@ -1,10 +1,9 @@
-//! Database service client for CRUD operations on collections.
+//! Database service client using WIT-generated imports.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::context::Context;
-use crate::types::*;
+use crate::wafer::block_world::database as wit;
 
 /// A record returned from the database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,134 +24,145 @@ pub struct RecordList {
 /// Options for listing records.
 #[derive(Debug, Clone, Default)]
 pub struct ListOptions {
-    /// Filter expression (e.g. `"status = 'active'"`).
-    pub filter: String,
-    /// Sort expression (e.g. `"created_at DESC"`).
-    pub sort: String,
-    /// Page number (1-based).
-    pub page: i64,
-    /// Number of records per page.
-    pub page_size: i64,
+    pub filters: Vec<Filter>,
+    pub sort: Vec<SortField>,
+    pub limit: i64,
+    pub offset: i64,
 }
 
-/// Client for the host database service.
-///
-/// All operations are synchronous and cross the WASM boundary via
-/// [`Context::send`].
-pub struct DatabaseClient<'a> {
-    ctx: &'a Context,
+/// A filter condition.
+#[derive(Debug, Clone)]
+pub struct Filter {
+    pub field: String,
+    pub operator: FilterOp,
+    pub value: serde_json::Value,
 }
 
-impl<'a> DatabaseClient<'a> {
-    /// Create a new database client bound to the given context.
-    pub fn new(ctx: &'a Context) -> Self {
-        Self { ctx }
+/// Filter operators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterOp {
+    Eq, Neq, Gt, Gte, Lt, Lte, Like, In, IsNull, IsNotNull,
+}
+
+/// A sort directive.
+#[derive(Debug, Clone)]
+pub struct SortField {
+    pub field: String,
+    pub desc: bool,
+}
+
+/// Database error type.
+#[derive(Debug, Clone)]
+pub struct DatabaseError {
+    pub kind: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for DatabaseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.kind, self.message)
     }
+}
 
-    /// Retrieve a single record by ID from a collection.
-    pub fn get(&self, collection: &str, id: &str) -> std::result::Result<Record, WaferError> {
-        let mut msg = Message::new("svc.database.get", Vec::new());
-        msg.set_meta("collection", collection);
-        msg.set_meta("id", id);
+impl std::error::Error for DatabaseError {}
 
-        let result = self.ctx.send(&msg);
-        self.parse_record(result)
+fn convert_wit_error(e: wit::DatabaseError) -> DatabaseError {
+    match e {
+        wit::DatabaseError::NotFound => DatabaseError { kind: "not_found".into(), message: "record not found".into() },
+        wit::DatabaseError::Internal => DatabaseError { kind: "internal".into(), message: "internal database error".into() },
     }
+}
 
-    /// List records with optional filtering, sorting, and pagination.
-    pub fn list(
-        &self,
-        collection: &str,
-        opts: &ListOptions,
-    ) -> std::result::Result<RecordList, WaferError> {
-        let mut msg = Message::new("svc.database.list", Vec::new());
-        msg.set_meta("collection", collection);
-        if !opts.filter.is_empty() {
-            msg.set_meta("filter", &opts.filter);
-        }
-        if !opts.sort.is_empty() {
-            msg.set_meta("sort", &opts.sort);
-        }
-        if opts.page > 0 {
-            msg.set_meta("page", opts.page.to_string());
-        }
-        if opts.page_size > 0 {
-            msg.set_meta("page_size", opts.page_size.to_string());
-        }
+fn record_from_wit(r: wit::DbRecord) -> Record {
+    let data: HashMap<String, serde_json::Value> = serde_json::from_str(&r.data).unwrap_or_default();
+    Record { id: r.id, data }
+}
 
-        let result = self.ctx.send(&msg);
-        self.parse_response::<RecordList>(result)
+fn convert_filter(f: &Filter) -> wit::Filter {
+    wit::Filter {
+        field: f.field.clone(),
+        operator: match f.operator {
+            FilterOp::Eq => wit::FilterOp::Eq,
+            FilterOp::Neq => wit::FilterOp::Neq,
+            FilterOp::Gt => wit::FilterOp::Gt,
+            FilterOp::Gte => wit::FilterOp::Gte,
+            FilterOp::Lt => wit::FilterOp::Lt,
+            FilterOp::Lte => wit::FilterOp::Lte,
+            FilterOp::Like => wit::FilterOp::Like,
+            FilterOp::In => wit::FilterOp::In,
+            FilterOp::IsNull => wit::FilterOp::IsNull,
+            FilterOp::IsNotNull => wit::FilterOp::IsNotNull,
+        },
+        value: serde_json::to_string(&f.value).unwrap_or_default(),
     }
+}
 
-    /// Insert a new record into a collection. The data is serialized as JSON
-    /// in the message body.
-    pub fn create(
-        &self,
-        collection: &str,
-        data: &HashMap<String, serde_json::Value>,
-    ) -> std::result::Result<Record, WaferError> {
-        let body = serde_json::to_vec(data)
-            .map_err(|e| WaferError::new("encode_error", e.to_string()))?;
-
-        let mut msg = Message::new("svc.database.create", body);
-        msg.set_meta("collection", collection);
-
-        let result = self.ctx.send(&msg);
-        self.parse_record(result)
+fn convert_list_options(opts: &ListOptions) -> wit::ListOptions {
+    wit::ListOptions {
+        filters: opts.filters.iter().map(convert_filter).collect(),
+        sort: opts.sort.iter().map(|s| wit::SortField { field: s.field.clone(), desc: s.desc }).collect(),
+        limit: opts.limit,
+        offset: opts.offset,
     }
+}
 
-    /// Update an existing record by ID.
-    pub fn update(
-        &self,
-        collection: &str,
-        id: &str,
-        data: &HashMap<String, serde_json::Value>,
-    ) -> std::result::Result<Record, WaferError> {
-        let body = serde_json::to_vec(data)
-            .map_err(|e| WaferError::new("encode_error", e.to_string()))?;
+/// Retrieve a single record by ID from a collection.
+pub fn get(collection: &str, id: &str) -> Result<Record, DatabaseError> {
+    wit::get(collection, id)
+        .map(record_from_wit)
+        .map_err(convert_wit_error)
+}
 
-        let mut msg = Message::new("svc.database.update", body);
-        msg.set_meta("collection", collection);
-        msg.set_meta("id", id);
+/// List records with optional filtering, sorting, and pagination.
+pub fn list(collection: &str, opts: &ListOptions) -> Result<RecordList, DatabaseError> {
+    let wit_opts = convert_list_options(opts);
+    wit::list(collection, &wit_opts)
+        .map(|rl| RecordList {
+            records: rl.records.into_iter().map(record_from_wit).collect(),
+            total_count: rl.total_count,
+            page: rl.page,
+            page_size: rl.page_size,
+        })
+        .map_err(convert_wit_error)
+}
 
-        let result = self.ctx.send(&msg);
-        self.parse_record(result)
-    }
+/// Create a new record in a collection.
+pub fn create(collection: &str, data: &HashMap<String, serde_json::Value>) -> Result<Record, DatabaseError> {
+    let json = serde_json::to_string(data).unwrap_or_default();
+    wit::create(collection, &json)
+        .map(record_from_wit)
+        .map_err(convert_wit_error)
+}
 
-    /// Delete a record by ID.
-    pub fn delete(&self, collection: &str, id: &str) -> std::result::Result<(), WaferError> {
-        let mut msg = Message::new("svc.database.delete", Vec::new());
-        msg.set_meta("collection", collection);
-        msg.set_meta("id", id);
+/// Update an existing record by ID.
+pub fn update(collection: &str, id: &str, data: &HashMap<String, serde_json::Value>) -> Result<Record, DatabaseError> {
+    let json = serde_json::to_string(data).unwrap_or_default();
+    wit::update(collection, id, &json)
+        .map(record_from_wit)
+        .map_err(convert_wit_error)
+}
 
-        let result = self.ctx.send(&msg);
-        if result.action == Action::Error {
-            return Err(result
-                .error
-                .unwrap_or_else(|| WaferError::new("unknown", "database delete failed")));
-        }
-        Ok(())
-    }
+/// Delete a record by ID.
+pub fn delete(collection: &str, id: &str) -> Result<(), DatabaseError> {
+    wit::delete(collection, id).map_err(convert_wit_error)
+}
 
-    // -- internal helpers ---------------------------------------------------
+/// Count records matching filters.
+pub fn count(collection: &str, filters: &[Filter]) -> Result<i64, DatabaseError> {
+    let wit_filters: Vec<wit::Filter> = filters.iter().map(convert_filter).collect();
+    wit::count(collection, &wit_filters).map_err(convert_wit_error)
+}
 
-    fn parse_record(&self, result: Result_) -> std::result::Result<Record, WaferError> {
-        self.parse_response::<Record>(result)
-    }
+/// Execute a raw SELECT query.
+pub fn query_raw(query: &str, args: &[serde_json::Value]) -> Result<Vec<Record>, DatabaseError> {
+    let args_json = serde_json::to_string(args).unwrap_or_default();
+    wit::query_raw(query, &args_json)
+        .map(|records| records.into_iter().map(record_from_wit).collect())
+        .map_err(convert_wit_error)
+}
 
-    fn parse_response<T: serde::de::DeserializeOwned>(
-        &self,
-        result: Result_,
-    ) -> std::result::Result<T, WaferError> {
-        if result.action == Action::Error {
-            return Err(result
-                .error
-                .unwrap_or_else(|| WaferError::new("unknown", "database operation failed")));
-        }
-        let resp = result
-            .response
-            .ok_or_else(|| WaferError::new("no_response", "host returned no response data"))?;
-        serde_json::from_slice(&resp.data)
-            .map_err(|e| WaferError::new("decode_error", e.to_string()))
-    }
+/// Execute a raw non-SELECT statement.
+pub fn exec_raw(query: &str, args: &[serde_json::Value]) -> Result<i64, DatabaseError> {
+    let args_json = serde_json::to_string(args).unwrap_or_default();
+    wit::exec_raw(query, &args_json).map_err(convert_wit_error)
 }

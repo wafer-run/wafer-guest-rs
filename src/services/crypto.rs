@@ -1,112 +1,58 @@
-//! Crypto service client for hashing, token signing, and verification.
+//! Crypto service client using WIT-generated imports.
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::context::Context;
-use crate::types::*;
+use crate::wafer::block_world::crypto as wit;
 
-/// A signed token response from the host.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenResponse {
-    pub token: String,
+/// Crypto error type.
+#[derive(Debug, Clone)]
+pub struct CryptoError {
+    pub kind: String,
+    pub message: String,
 }
 
-/// Verified token claims returned by the host.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenClaims {
-    pub claims: HashMap<String, serde_json::Value>,
+impl std::fmt::Display for CryptoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.kind, self.message)
+    }
 }
 
-/// Client for the host crypto service.
-pub struct CryptoClient<'a> {
-    ctx: &'a Context,
+impl std::error::Error for CryptoError {}
+
+fn convert_wit_error(e: wit::CryptoError) -> CryptoError {
+    match e {
+        wit::CryptoError::HashError => CryptoError { kind: "hash_error".into(), message: "hash operation failed".into() },
+        wit::CryptoError::PasswordMismatch => CryptoError { kind: "password_mismatch".into(), message: "password does not match".into() },
+        wit::CryptoError::SignError => CryptoError { kind: "sign_error".into(), message: "sign operation failed".into() },
+        wit::CryptoError::VerifyError => CryptoError { kind: "verify_error".into(), message: "verify operation failed".into() },
+        wit::CryptoError::Other => CryptoError { kind: "other".into(), message: "crypto error".into() },
+    }
 }
 
-impl<'a> CryptoClient<'a> {
-    /// Create a new crypto client bound to the given context.
-    pub fn new(ctx: &'a Context) -> Self {
-        Self { ctx }
-    }
+/// Produce a one-way hash of a password.
+pub fn hash(password: &str) -> Result<String, CryptoError> {
+    wit::hash(password).map_err(convert_wit_error)
+}
 
-    /// Produce a one-way hash of the given password.
-    pub fn hash(&self, password: &str) -> std::result::Result<String, WaferError> {
-        let msg = Message::new("svc.crypto.hash", password.as_bytes().to_vec());
+/// Check a password against a hash. Returns Ok(()) if match.
+pub fn compare_hash(password: &str, hash: &str) -> Result<(), CryptoError> {
+    wit::compare_hash(password, hash).map_err(convert_wit_error)
+}
 
-        let result = self.ctx.send(&msg);
-        if result.action == Action::Error {
-            return Err(result
-                .error
-                .unwrap_or_else(|| WaferError::new("unknown", "crypto hash failed")));
-        }
+/// Create a signed token from claims with the given expiry in seconds.
+pub fn sign(claims: &HashMap<String, serde_json::Value>, expiry_secs: u64) -> Result<String, CryptoError> {
+    let json = serde_json::to_string(claims).unwrap_or_default();
+    wit::sign(&json, expiry_secs).map_err(convert_wit_error)
+}
 
-        let resp = result
-            .response
-            .ok_or_else(|| WaferError::new("no_response", "host returned no response data"))?;
-        Ok(String::from_utf8_lossy(&resp.data).into_owned())
-    }
+/// Verify a token and return its claims.
+pub fn verify(token: &str) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
+    wit::verify(token)
+        .map(|json| serde_json::from_str(&json).unwrap_or_default())
+        .map_err(convert_wit_error)
+}
 
-    /// Compare a password against a previously-computed hash.
-    pub fn compare_hash(
-        &self,
-        password: &str,
-        hash: &str,
-    ) -> std::result::Result<(), WaferError> {
-        let mut msg = Message::new("svc.crypto.compare_hash", password.as_bytes().to_vec());
-        msg.set_meta("hash", hash);
-
-        let result = self.ctx.send(&msg);
-        if result.action == Action::Error {
-            return Err(result
-                .error
-                .unwrap_or_else(|| WaferError::new("unknown", "crypto compare_hash failed")));
-        }
-        Ok(())
-    }
-
-    /// Create a signed token from claims with the given expiry in seconds.
-    pub fn sign(
-        &self,
-        claims: &HashMap<String, serde_json::Value>,
-        expiry_secs: u64,
-    ) -> std::result::Result<String, WaferError> {
-        let body = serde_json::to_vec(claims)
-            .map_err(|e| WaferError::new("encode_error", e.to_string()))?;
-
-        let mut msg = Message::new("svc.crypto.sign", body);
-        msg.set_meta("expiry", expiry_secs.to_string());
-
-        let result = self.ctx.send(&msg);
-        if result.action == Action::Error {
-            return Err(result
-                .error
-                .unwrap_or_else(|| WaferError::new("unknown", "crypto sign failed")));
-        }
-
-        let resp = result
-            .response
-            .ok_or_else(|| WaferError::new("no_response", "host returned no response data"))?;
-        Ok(String::from_utf8_lossy(&resp.data).into_owned())
-    }
-
-    /// Verify a token and return its claims.
-    pub fn verify(
-        &self,
-        token: &str,
-    ) -> std::result::Result<HashMap<String, serde_json::Value>, WaferError> {
-        let msg = Message::new("svc.crypto.verify", token.as_bytes().to_vec());
-
-        let result = self.ctx.send(&msg);
-        if result.action == Action::Error {
-            return Err(result
-                .error
-                .unwrap_or_else(|| WaferError::new("unknown", "crypto verify failed")));
-        }
-
-        let resp = result
-            .response
-            .ok_or_else(|| WaferError::new("no_response", "host returned no response data"))?;
-        serde_json::from_slice(&resp.data)
-            .map_err(|e| WaferError::new("decode_error", e.to_string()))
-    }
+/// Generate n cryptographically-secure random bytes.
+pub fn random_bytes(n: u32) -> Result<Vec<u8>, CryptoError> {
+    wit::random_bytes(n).map_err(convert_wit_error)
 }
